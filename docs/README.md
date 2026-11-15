@@ -53,6 +53,7 @@ connect your own applications.
 | [Node Topology & Workload Placement](customize/node_topology.md) | Separating platform and inference workloads on multi-node clusters |
 | [NRI CPU Balloons](customize/nri_cpu_balloons.md) | NUMA-aware CPU pinning for inference pods |
 | [Node Scaling](customize/node_scaling.md) | Adding/removing nodes from an already-provisioned cluster (`add-node`/`remove-node`) |
+| [Kata & Confidential Runtime](customize/kata_confidential_containers.md) | Pods in their own VM, or in an Intel® TDX Trust Domain |
 
 ## Reference
 

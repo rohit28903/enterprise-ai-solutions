@@ -5,6 +5,70 @@
 # Kata Containers — Teardown
 # =============================================================================
 
+# kata-deploy's cleanup removes /opt/kata and the containerd runtime config, but it does not stop
+# Kata VMs that are still running: their shim and QEMU processes keep running (and holding memory)
+# with nothing left to manage them. So refuse while pods still use a Kata RuntimeClass.
+# The lookups must succeed: an empty answer from a failed call would let the teardown through
+- name: "kata_containers | teardown | Get RuntimeClasses"
+  kubernetes.core.k8s_info:
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+  register: _kata_td_rcs
+
+# Kata RuntimeClasses are taken from the cluster, not from this run's config
+- name: "kata_containers | teardown | Record the Kata RuntimeClasses"
+  ansible.builtin.set_fact:
+    _kata_rcs: >-
+      {{ _kata_td_rcs.resources
+         | selectattr('handler', 'match', '^kata')
+         | map(attribute='metadata.name') | list }}
+
+# During a layer teardown, warm-pool pods removed just before may still be terminating:
+# give them up to 2 minutes (a timeout here is fine; the next lookup decides)
+- name: "kata_containers | teardown | Wait for Kata pods that are being deleted"
+  kubernetes.core.k8s_info:
+    kind: Pod
+  register: _kata_td_wait
+  until: >-
+    _kata_td_wait.resources is defined and
+    (_kata_td_wait.resources
+     | selectattr('spec.runtimeClassName', 'defined')
+     | selectattr('spec.runtimeClassName', 'in', _kata_rcs)
+     | selectattr('metadata.deletionTimestamp', 'defined') | list | length == 0)
+  retries: 24
+  delay: 5
+  failed_when: false
+
+- name: "kata_containers | teardown | Get pods"
+  kubernetes.core.k8s_info:
+    kind: Pod
+  register: _kata_td_pods
+
+- name: "kata_containers | teardown | Find pods that still use a Kata RuntimeClass"
+  ansible.builtin.set_fact:
+    _kata_td_running: >-
+      {{ _kata_td_pods.resources
+         | selectattr('spec.runtimeClassName', 'defined')
+         | selectattr('spec.runtimeClassName', 'in', _kata_rcs)
+         | rejectattr('status.phase', 'in', ['Succeeded', 'Failed'])
+         | list }}
+
+- name: "kata_containers | teardown | Stop while pods still use a Kata RuntimeClass"
+  ansible.builtin.fail:
+    msg: |-
+      {{ _kata_td_running | length }} pod(s) still run in Kata VMs. Removing Kata now would leave their VMs
+      running with nothing to manage them. Remove these pods first:
+      {% for p in _kata_td_running[:20] %}
+        {{ p.metadata.namespace }}/{{ p.metadata.name }} ({{ p.spec.runtimeClassName }}{{ ', still terminating' if p.metadata.deletionTimestamp is defined else '' }}{{ ', owned by ' ~ p.metadata.ownerReferences[0].kind ~ '/' ~ p.metadata.ownerReferences[0].name if p.metadata.ownerReferences | default([]) | length > 0 else '' }})
+      {% endfor %}
+      Pods owned by a controller come back when deleted: tear down the component that creates them first
+      (Agent Sandbox's Kata warm pool: es_auto_installer.sh teardown agent_sandbox --only, or scale the
+      SandboxWarmPool to 0). Set kata_teardown_force: true to remove Kata anyway; the VMs then keep
+      running until they are stopped by hand.
+  when:
+    - _kata_td_running | length > 0
+    - not (kata_teardown_force | bool)
+
 - name: "kata_containers | teardown | Remove kata-deploy Helm release"
   kubernetes.core.helm:
     name: "{{ kata_release_name }}"
@@ -28,11 +92,33 @@
     name: "{{ item.metadata.name }}"
     definition:
       metadata:
-        labels: "{{ { kata_node_label_key: none } }}"
+        labels: "{{ { kata_node_label_key: none, kata_tdx_node_label_key: none } }}"
   loop: "{{ _kata_labelled_nodes.resources | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }}"
   failed_when: false
+
+# Catches VMs the API no longer knows about (e.g. after a failed pod delete, or a forced teardown)
+- name: "kata_containers | teardown | Check nodes for leftover Kata VM processes"
+  ansible.builtin.command:
+    argv: [pgrep, -fc, "[c]ontainerd-shim-kata-v2|[q]emu-system-x86_64 -name sandbox-"]
+  become: true
+  delegate_to: "{{ item }}"
+  loop: "{{ (groups['kube_control_plane'] | default([])) | union(groups['kube_node'] | default([])) | unique }}"
+  register: _kata_td_leftovers
+  changed_when: false
+  failed_when: false
+
+- name: "kata_containers | teardown | Warn about leftover Kata VM processes"
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ item.item }} still runs {{ item.stdout | trim }} Kata shim/QEMU process(es) after the teardown.
+      They hold memory until stopped: list them with
+      pgrep -af 'containerd-shim-kata-v2|qemu-system-x86_64 -name sandbox-' and stop them by PID.
+  loop: "{{ _kata_td_leftovers.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: (item.stdout | default('0') | trim) not in ['', '0']
 
 - name: "kata_containers | teardown | Complete"
   ansible.builtin.debug:

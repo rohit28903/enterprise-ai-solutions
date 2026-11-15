@@ -419,6 +419,8 @@ where `init` seeds them (a value there wins over `config.agent-toolkit.yaml`).
 |---|---|---|
 | `kata_containers_enabled` | `false` | Install Kata Containers (the `kata_containers` infrastructure component) with the upstream kata-deploy chart |
 | `kata_runtime` | `kata-fc` | `kata-fc` (Firecracker) \| `kata-qemu` \| `both`: which RuntimeClasses kata-deploy creates |
+| `kata_confidential_runtime` | `""` | Adds a confidential runtime next to `kata_runtime`: `kata-qemu-tdx` (each pod in an Intel® TDX Trust Domain) or `kata-qemu-coco-dev` (same flow in a normal VM, for testing). See [Kata & Confidential Runtime](kata_confidential_containers.md) |
+| `kata_teardown_force` | `false` | Tear Kata down even while pods still run in Kata VMs |
 | `kubernetes_registry_enabled` | `false` | Kubespray's in-cluster image registry (`kube-system`, ClusterIP, port 5000). `config.agent-toolkit.yaml` turns it on; it applies only when Kubespray provisions the cluster, so run `init agent-toolkit` before the first install |
 
 Before anything is installed, every node in the inventory is checked and
@@ -435,9 +437,16 @@ A missing prerequisite stops the install with its cause and every node's
 preflight result. Nodes without `/dev/kvm` are left out as long as one node has
 it. Kata is not supported on a BYO cluster (`existing_kubernetes`) or on
 OpenShift: the host preparation runs over SSH on the inventory nodes, so the
-install stops there. Teardown removes the kata-deploy release and the node
-label; the thin-pool unit, the containerd config entry and the `vhost_vsock`
-module entry stay on the nodes.
+install stops there. Teardown refuses while pods still run in Kata VMs (their VMs
+would keep running unmanaged; `kata_teardown_force: true` overrides), then removes
+the kata-deploy release and the node labels (`ei-kata-eligible`, `ei-tdx-eligible`);
+the thin-pool unit, the containerd config entry and the `vhost_vsock` module entry
+stay on the nodes.
+
+With `kata_confidential_runtime` set, nodes that pass the TDX checks are labelled
+`ei-tdx-eligible=true`, the guest pulls images itself, and containerd forwards only
+the two Kata annotations the confidential flow needs. TDX host prerequisites,
+limits and troubleshooting: [Kata & Confidential Runtime](kata_confidential_containers.md).
 
 ---
 
@@ -474,5 +483,6 @@ Example: `config.erag.yaml` sets RAG pipeline parameters like `ui_enabled`, `edp
 |---|---|
 | See every CLI command and flag that reads this file | [CLI Reference](cli.md) |
 | Configure per-node CPU pinning (`kubernetes_cpu_policy: nri-balloons`) in depth | [NRI CPU Balloons](nri_cpu_balloons.md) |
+| Run pods in Kata VMs or Intel® TDX Trust Domains (`kata_containers_enabled`, `kata_confidential_runtime`) | [Kata & Confidential Runtime](kata_confidential_containers.md) |
 | Set up soft affinity for platform vs. inference workloads (`node_topology_enabled`) | [Node Topology & Workload Placement](node_topology.md) |
 | Go from a fresh clone to a running cluster using these settings | [Deployment Guide](../deploy/install_platform.md) |
