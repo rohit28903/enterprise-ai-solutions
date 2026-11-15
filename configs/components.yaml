@@ -117,6 +117,12 @@ components:
     enabled: "{{ cert_manager_enabled | default(true) | bool }}"
     depends_on: []
 
+  # Policy engine (admission control); opt in. Used by confidential_containers.
+  - name: kyverno
+    layer: platform
+    enabled: "{{ kyverno_enabled | default(false) | bool }}"
+    depends_on: []
+
   # Skipped on OpenShift: the mesh is Service Mesh 3 (Sail operator), which owns
   # the Istio CRDs and control plane.
   - name: istio

@@ -1,0 +1,158 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Kyverno — Validate
+# =============================================================================
+
+- name: "kyverno | validate | Check Helm release"
+  kubernetes.core.helm_info:
+    name: "{{ kyverno_release_name }}"
+    release_namespace: "{{ kyverno_namespace }}"
+  register: _kyv_release
+
+- name: "kyverno | validate | Assert Kyverno is installed"
+  ansible.builtin.assert:
+    that: _kyv_release.status is defined
+    fail_msg: "Kyverno is not installed in namespace {{ kyverno_namespace }}. Run: es_auto_installer.sh install kyverno"
+    success_msg: "Kyverno Helm release found ({{ _kyv_release.status.chart | default('') }})"
+
+- name: "kyverno | validate | Get Kyverno controllers"
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ kyverno_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/part-of={{ kyverno_release_name }}"
+  register: _kyv_deploys
+
+- name: "kyverno | validate | Assert every controller has ready replicas"
+  vars:
+    _not_ready: >-
+      {{ _kyv_deploys.resources | rejectattr('status.readyReplicas', 'defined')
+         | map(attribute='metadata.name') | list
+         + (_kyv_deploys.resources | selectattr('status.readyReplicas', 'defined')
+            | selectattr('status.readyReplicas', 'lt', 1) | map(attribute='metadata.name') | list) }}
+  ansible.builtin.assert:
+    that:
+      - _kyv_deploys.resources | length >= 1
+      - _not_ready | length == 0
+    fail_msg: "Kyverno controllers not ready: {{ _not_ready | join(', ') }}"
+    success_msg: "Kyverno controllers ready: {{ _kyv_deploys.resources | map(attribute='metadata.name') | join(', ') }}"
+
+- name: "kyverno | validate | Check the ValidatingPolicy CRD"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: validatingpolicies.policies.kyverno.io
+  register: _kyv_vp_crd
+  failed_when: _kyv_vp_crd.resources | length == 0
+
+# A throw-away policy proves the admission path works end to end. The test pod
+# is sent as a server-side dry run, so it is checked but never created.
+- name: "kyverno | validate | Smoke test (throw-away ValidatingPolicy)"
+  when: kyverno_validate_smoke_test | bool
+  block:
+    - name: "kyverno | validate | Create smoke-test namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ kyverno_smoke_namespace }}"
+            labels:
+              kyverno-smoke-test: "true"
+              pod-security.kubernetes.io/enforce: "restricted"
+
+    - name: "kyverno | validate | Create smoke-test ValidatingPolicy"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: policies.kyverno.io/v1
+          kind: ValidatingPolicy
+          metadata:
+            name: kyverno-smoke-test
+          spec:
+            validationActions: [Deny]
+            matchConstraints:
+              namespaceSelector:
+                matchLabels:
+                  kyverno-smoke-test: "true"
+              resourceRules:
+                - apiGroups: [""]
+                  apiVersions: ["v1"]
+                  operations: ["CREATE"]
+                  resources: ["pods"]
+            validations:
+              - expression: "!('kyverno-smoke-deny' in object.metadata.?labels.orValue({}))"
+                message: "kyverno smoke test: pods labelled kyverno-smoke-deny are rejected"
+
+    - name: "kyverno | validate | Wait until the smoke-test policy is ready"
+      kubernetes.core.k8s_info:
+        api_version: policies.kyverno.io/v1
+        kind: ValidatingPolicy
+        name: kyverno-smoke-test
+      register: _kyv_smoke_policy
+      until: (_kyv_smoke_policy.resources[0].status.conditionStatus.ready | default(false)) | bool
+      retries: 24
+      delay: 5
+
+    - name: "kyverno | validate | Dry-run a pod the policy must reject"
+      ansible.builtin.command:
+        cmd: kubectl create --dry-run=server -f -
+        stdin: "{{ _kyv_smoke_pod | combine({'metadata': {'labels': {'kyverno-smoke-deny': 'true'}}}, recursive=True) | to_json }}"
+      register: _kyv_smoke_deny
+      changed_when: false
+      failed_when: _kyv_smoke_deny.rc == 0 or 'kyverno smoke test' not in _kyv_smoke_deny.stderr
+
+    - name: "kyverno | validate | Dry-run a pod the policy must allow"
+      ansible.builtin.command:
+        cmd: kubectl create --dry-run=server -f -
+        stdin: "{{ _kyv_smoke_pod | to_json }}"
+      register: _kyv_smoke_allow
+      changed_when: false
+
+    - name: "kyverno | validate | Smoke test passed"
+      ansible.builtin.debug:
+        msg: "Kyverno admission works: the test policy rejected the labelled pod and allowed the other one."
+
+  always:
+    - name: "kyverno | validate | Remove smoke-test policy"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: policies.kyverno.io/v1
+        kind: ValidatingPolicy
+        name: kyverno-smoke-test
+      failed_when: false
+
+    - name: "kyverno | validate | Remove smoke-test namespace"
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ kyverno_smoke_namespace }}"
+        wait: true
+      failed_when: false
+
+  vars:
+    _kyv_smoke_pod:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: kyverno-smoke
+        namespace: "{{ kyverno_smoke_namespace }}"
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65534
+          seccompProfile: {type: RuntimeDefault}
+        containers:
+          - name: c
+            image: registry.k8s.io/pause:3.10
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities: {drop: ["ALL"]}
+
+- name: "kyverno | validate | Validation passed"
+  ansible.builtin.debug:
+    msg: "Kyverno validation passed."

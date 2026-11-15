@@ -137,6 +137,9 @@ seaweedfs_volume_storage_size: "10Gi"
 # upgrades this platform's own older release. Never downgrades.
 # envoy_gateway_upgrade: false
 
+# --- Kyverno (policy engine, opt-in; needed by confidential_containers) ---
+kyverno_enabled: false
+
 # --- Kata Containers (microVM runtime for Agent Sandbox — requires agent-toolkit) ---
 kata_containers_enabled: false
 kata_runtime: "kata-fc"                   # kata-fc | kata-qemu | both
