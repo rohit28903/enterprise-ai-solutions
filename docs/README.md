@@ -55,6 +55,7 @@ connect your own applications.
 | [NRI CPU Balloons](customize/nri_cpu_balloons.md) | NUMA-aware CPU pinning for inference pods |
 | [Node Scaling](customize/node_scaling.md) | Adding/removing nodes from an already-provisioned cluster (`add-node`/`remove-node`) |
 | [Kata & Confidential Runtime](customize/kata_confidential_containers.md) | Pods in their own VM, or in an Intel® TDX Trust Domain |
+| [Confidential Containers Contract](customize/confidential_containers.md) | initdata, ConfigMap and Kyverno policy for pods in a Trust Domain |
 
 ## Reference
 

@@ -1,0 +1,8 @@
+# Kata agent policy for confidential pods — managed by the confidential_containers role.
+# Based on kata-containers 4.2.0 src/kata-opa/allow-all.rego: every agent request is
+# allowed except the ones listed in cc_agent_policy_denied.
+package agent_policy
+
+{% for r in cc_agent_policy_requests %}
+default {{ r }} := {{ 'false' if r in cc_agent_policy_denied else 'true' }}
+{% endfor %}

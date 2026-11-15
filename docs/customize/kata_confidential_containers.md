@@ -192,6 +192,8 @@ spec:
   into its own RAM: the Agent Sandbox image (163 MB compressed) takes about 530 MiB. Include it in the memory limit.
 - **No `kubectl port-forward`** into Kata pods (kata-containers issue #1693).
 - **Attestation** (proving a pod runs in a real TD before releasing secrets) is not set up by this component yet.
+- **Policy and initdata** (no `kubectl exec`, only approved pods in opted-in namespaces) come from the
+  [Confidential Containers Contract](confidential_containers.md) component.
 
 ## 6. Troubleshooting
 

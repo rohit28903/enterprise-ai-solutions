@@ -1,0 +1,127 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Confidential Containers — Install the confidential-runtime contract
+# =============================================================================
+
+- name: "confidential_containers | Fail when no confidential Kata runtime is configured"
+  ansible.builtin.fail:
+    msg: >-
+      confidential_containers_enabled is set but kata_confidential_runtime is empty.
+      Set kata_containers_enabled: true and kata_confidential_runtime: kata-qemu-tdx
+      (or kata-qemu-coco-dev for testing without TDX), install kata_containers, then re-run.
+  when: kata_confidential_runtime | default('') | length == 0
+
+- name: "confidential_containers | Check the confidential RuntimeClass exists"
+  kubernetes.core.k8s_info:
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+    name: "{{ kata_confidential_runtime }}"
+  register: _cc_rc
+  failed_when: _cc_rc.resources | length == 0
+
+- name: "confidential_containers | Check Kyverno is installed"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: validatingpolicies.policies.kyverno.io
+  register: _cc_kyverno_crd
+
+- name: "confidential_containers | Fail when Kyverno is missing"
+  ansible.builtin.fail:
+    msg: >-
+      The confidential-runtime policy needs Kyverno (ValidatingPolicy CRD not found).
+      Set kyverno_enabled: true and install kyverno, then re-run.
+  when: _cc_kyverno_crd.resources | length == 0
+
+# initdata: TOML -> gzip -> base64 is the cc_init_data annotation value. gzip -n
+# keeps the output byte-identical between runs, so the policy and the ConfigMap
+# stay unchanged. The sha384 digest is what an attestation verifier compares
+# against the TD's MRCONFIGID (Phase 3).
+- name: "confidential_containers | Encode initdata"
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      printf '%s' "$INITDATA" | gzip -9 -n | base64 -w0
+      echo
+      printf '%s' "$INITDATA" | sha384sum | cut -d' ' -f1
+    executable: /bin/bash
+  environment:
+    INITDATA: "{{ lookup('ansible.builtin.template', 'initdata.toml.j2') }}"
+  register: _cc_initdata
+  changed_when: false
+
+- name: "confidential_containers | Record initdata"
+  ansible.builtin.set_fact:
+    cc_initdata_b64: "{{ _cc_initdata.stdout_lines[0] }}"
+    cc_initdata_sha384: "{{ _cc_initdata.stdout_lines[1] }}"
+
+- name: "confidential_containers | Publish ConfigMap {{ cc_configmap_namespace }}/{{ cc_configmap_name }}"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ cc_configmap_name }}"
+        namespace: "{{ cc_configmap_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: ai-solutions
+          app.kubernetes.io/part-of: confidential-containers
+      data:
+        runtimeClass: "{{ kata_confidential_runtime }}"
+        initdata: "{{ cc_initdata_b64 }}"
+        initdataDigest: "sha384:{{ cc_initdata_sha384 }}"
+        kbsAddress: "{{ cc_kbs_address }}"
+        namespaceLabel: "{{ cc_namespace_label_key }}=true"
+        allowedKataAnnotations: "{{ cc_allowed_kata_annotations | join(',') }}"
+        createContainerTimeout: "{{ cc_create_container_timeout }}"
+
+# Two policies: pod CREATE rules (also generated for pod controllers), and an
+# admission-only policy for UPDATEs and kubectl debug
+- name: "confidential_containers | Apply ValidatingPolicies"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('ansible.builtin.template', item) | from_yaml }}"
+  loop:
+    - validating-policy.yaml.j2
+    - immutability-policy.yaml.j2
+
+- name: "confidential_containers | Wait until the policies are ready"
+  kubernetes.core.k8s_info:
+    api_version: policies.kyverno.io/v1
+    kind: ValidatingPolicy
+    name: "{{ item }}"
+  loop: "{{ _cc_policy_names }}"
+  register: _cc_policy
+  until: (_cc_policy.resources[0].status.conditionStatus.ready | default(false)) | bool
+  retries: 24
+  delay: 5
+
+# The native policies are what keeps the rules enforced while Kyverno is down
+- name: "confidential_containers | Wait for the native ValidatingAdmissionPolicy bindings"
+  kubernetes.core.k8s_info:
+    api_version: admissionregistration.k8s.io/v1
+    kind: ValidatingAdmissionPolicyBinding
+    name: "vpol-{{ item }}-binding"
+  loop: "{{ _cc_policy_names }}"
+  register: _cc_vap_binding
+  until: >-
+    _cc_vap_binding.resources | length == 1
+    and 'Deny' in (_cc_vap_binding.resources[0].spec.validationActions | default([]))
+  retries: 24
+  delay: 5
+
+- name: "confidential_containers | Summary"
+  ansible.builtin.debug:
+    msg:
+      - "============================================================"
+      - "  Confidential-runtime contract published"
+      - "  RuntimeClass  : {{ kata_confidential_runtime }}"
+      - "  ConfigMap     : {{ cc_configmap_namespace }}/{{ cc_configmap_name }} (runtimeClass, initdata, initdataDigest)"
+      - "  initdata      : sha384:{{ cc_initdata_sha384[:16] }}… (agent policy denies {{ cc_agent_policy_denied | join(', ') }})"
+      - "  KBS           : {{ cc_kbs_address if cc_kbs_address | length > 0 else '(none — attestation not configured)' }}"
+      - "  Policies      : ValidatingPolicy {{ _cc_policy_names | join(', ') }}, namespaces labelled {{ cc_namespace_label_key }}=true"
+      - "  Opt in        : kubectl label namespace <ns> {{ cc_namespace_label_key }}=true"
+      - "============================================================"

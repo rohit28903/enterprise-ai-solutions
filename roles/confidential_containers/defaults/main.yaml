@@ -1,0 +1,101 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Confidential Containers Role Defaults — the confidential-runtime contract
+# =============================================================================
+# Publishes what workloads need to run pods in a confidential VM (TD), as
+# cluster objects instead of files in other repos:
+#   - ConfigMap kube-system/confidential-runtime: runtimeClass, initdata, digest
+#   - ValidatingPolicy confidential-runtime (Kyverno): in namespaces labelled
+#     <cc_namespace_label_key>=true, only pods with the approved runtime,
+#     initdata, Kata annotations and volume types are admitted.
+# Needs kata_containers with kata_confidential_runtime set, and kyverno.
+
+cc_configmap_name: "confidential-runtime"
+cc_configmap_namespace: "kube-system"
+cc_policy_name: "confidential-runtime"
+# confidential-runtime: pod CREATE rules; confidential-runtime-immutable: pod UPDATE + kubectl debug
+_cc_policy_names: ["{{ cc_policy_name }}", "{{ cc_policy_name }}-immutable"]
+
+# Workloads opt a namespace in with this label (value "true")
+cc_namespace_label_key: "confidential.intel.com/enforce"
+
+# Trustee KBS URL for attestation and sealed secrets (Phase 3). Empty: initdata
+# carries only the agent policy (no aa.toml / cdh.toml). Defaults to the
+# platform-wide kbs_address (unset, empty or null: no KBS), so one KBS setting serves
+# every confidential workload.
+cc_kbs_address: "{{ kbs_address | default('', true) }}"
+
+# Kata agent policy (policy.rego in initdata). Every agent request is allowed
+# except these: no kubectl exec, no policy swap, no reading container output
+# (kubectl logs), no diagnostic dumps. Remove ReadStreamRequest to allow logs.
+cc_agent_policy_denied:
+  - ExecProcessRequest
+  - SetPolicyRequest
+  - ReadStreamRequest
+  - GetDiagnosticDataRequest
+
+# Agent requests known to kata-containers 4.2.0 (src/kata-opa/allow-all.rego)
+cc_agent_policy_requests:
+  - AddARPNeighborsRequest
+  - AddSwapRequest
+  - CloseStdinRequest
+  - CopyFileRequest
+  - CreateContainerRequest
+  - CreateSandboxRequest
+  - DestroySandboxRequest
+  - ExecProcessRequest
+  - GetDiagnosticDataRequest
+  - GetMetricsRequest
+  - GetOOMEventRequest
+  - GuestDetailsRequest
+  - ListInterfacesRequest
+  - ListRoutesRequest
+  - MemAgentCompactConfig
+  - MemAgentMemcgConfig
+  - MemHotplugByProbeRequest
+  - OnlineCPUMemRequest
+  - PauseContainerRequest
+  - PullImageRequest
+  - ReadStreamRequest
+  - RemoveContainerRequest
+  - RemoveStaleVirtiofsShareMountsRequest
+  - ReseedRandomDevRequest
+  - ResumeContainerRequest
+  - SetGuestDateTimeRequest
+  - SetPolicyRequest
+  - SignalProcessRequest
+  - StartContainerRequest
+  - StartTracingRequest
+  - StatsContainerRequest
+  - StopTracingRequest
+  - TtyWinResizeRequest
+  - UpdateContainerRequest
+  - UpdateEphemeralMountsRequest
+  - UpdateInterfaceRequest
+  - UpdateRoutesRequest
+  - WaitProcessRequest
+  - WriteStreamRequest
+
+# Kata annotations a confidential pod may carry (matches the containerd
+# allowlist kata_containers sets for the confidential runtimes)
+cc_allowed_kata_annotations:
+  - io.katacontainers.config.hypervisor.cc_init_data
+  - io.katacontainers.config.runtime.create_container_timeout
+
+# Seconds; published for workloads to set create_container_timeout
+cc_create_container_timeout: "1800"
+
+# Volume types a confidential pod may use. Host-mounted volumes (PVC, hostPath,
+# NFS, CSI, ...) are not shared into the TD; emptyDir is an encrypted disk inside it.
+cc_allowed_volume_types:
+  - emptyDir
+  - configMap
+  - secret
+  - projected
+  - downwardAPI
+
+# validate: server-side dry-run pods against the policy in a throw-away namespace
+cc_validate_smoke_test: true
+cc_smoke_namespace: "confidential-smoke-test"

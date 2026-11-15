@@ -123,6 +123,13 @@ components:
     enabled: "{{ kyverno_enabled | default(false) | bool }}"
     depends_on: []
 
+  # Confidential-runtime contract: initdata, ConfigMap and Kyverno policy.
+  # Needs kata_containers (infrastructure) with kata_confidential_runtime set.
+  - name: confidential_containers
+    layer: platform
+    enabled: "{{ confidential_containers_enabled | default(false) | bool }}"
+    depends_on: [kyverno]
+
   # Skipped on OpenShift: the mesh is Service Mesh 3 (Sail operator), which owns
   # the Istio CRDs and control plane.
   - name: istio

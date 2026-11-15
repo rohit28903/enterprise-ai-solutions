@@ -1,0 +1,24 @@
+version = "0.1.0"
+algorithm = "sha384"
+
+[data]
+{% if cc_kbs_address | length > 0 %}
+"aa.toml" = '''
+[token_configs]
+[token_configs.kbs]
+url = "{{ cc_kbs_address }}"
+'''
+
+"cdh.toml" = '''
+socket = "unix:///run/confidential-containers/cdh.sock"
+credentials = []
+
+[kbc]
+name = "cc_kbc"
+url = "{{ cc_kbs_address }}"
+'''
+
+{% endif %}
+"policy.rego" = '''
+{% include 'policy.rego.j2' %}
+'''

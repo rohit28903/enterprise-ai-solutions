@@ -490,6 +490,21 @@ Opt-in policy engine (the `kyverno` platform component). Components that ship ad
 
 ---
 
+## Confidential Containers
+
+Opt-in contract for running pods in confidential VMs (the `confidential_containers` platform component): initdata,
+the ConfigMap `kube-system/confidential-runtime`, and admission policies for namespaces labelled
+`confidential.intel.com/enforce=true`. Needs `kata_confidential_runtime` and `kyverno_enabled`. See
+[Confidential Containers Contract](confidential_containers.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `confidential_containers_enabled` | `false` | Publish the contract |
+| `cc_kbs_address` | `kbs_address`, else `""` | Trustee KBS URL for attestation and sealed secrets (empty: none) |
+| `cc_agent_policy_denied` | exec, policy swap, logs, diagnostics | Kata agent requests confidential pods refuse |
+
+---
+
 ## Related Docs
 
 | If you want to… | Go to |
@@ -500,3 +515,4 @@ Opt-in policy engine (the `kyverno` platform component). Components that ship ad
 | Set up soft affinity for platform vs. inference workloads (`node_topology_enabled`) | [Node Topology & Workload Placement](node_topology.md) |
 | Go from a fresh clone to a running cluster using these settings | [Deployment Guide](../deploy/install_platform.md) |
 | Add admission policies with Kyverno (`kyverno_enabled`) | [Kyverno Policy Engine](kyverno.md) |
+| Run workloads in confidential VMs with an enforced contract (`confidential_containers_enabled`) | [Confidential Containers Contract](confidential_containers.md) |

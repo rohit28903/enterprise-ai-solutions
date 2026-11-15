@@ -1,0 +1,35 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Confidential Containers — Teardown
+# =============================================================================
+# Removes the policy and the ConfigMap. Namespace labels set by workloads are
+# left alone; without the policy they no longer restrict anything.
+
+- name: "confidential_containers | teardown | Check whether the ValidatingPolicy CRD exists"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: validatingpolicies.policies.kyverno.io
+  register: _cc_crd
+
+- name: "confidential_containers | teardown | Delete the ValidatingPolicies"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: policies.kyverno.io/v1
+    kind: ValidatingPolicy
+    name: "{{ item }}"
+  loop: "{{ _cc_policy_names }}"
+  when: _cc_crd.resources | length > 0
+
+- name: "confidential_containers | teardown | Delete ConfigMap {{ cc_configmap_namespace }}/{{ cc_configmap_name }}"
+  kubernetes.core.k8s:
+    state: absent
+    kind: ConfigMap
+    name: "{{ cc_configmap_name }}"
+    namespace: "{{ cc_configmap_namespace }}"
+
+- name: "confidential_containers | teardown | Complete"
+  ansible.builtin.debug:
+    msg: "confidential-runtime contract removed (policies {{ _cc_policy_names | join(', ') }}, ConfigMap {{ cc_configmap_namespace }}/{{ cc_configmap_name }})."

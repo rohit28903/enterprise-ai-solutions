@@ -1,0 +1,59 @@
+# After a confidential pod is created, in opted-in namespaces:
+#   - its io.katacontainers.* annotations must not change (read only when the TD starts, so a changed
+#     value would only mislead anyone auditing the pod);
+#   - ephemeral containers (kubectl debug) must not be added (they would be a new container in the TD).
+# Admission only: no background scan, and no rules generated for pod controllers.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: {{ cc_policy_name }}-immutable
+  labels:
+    app.kubernetes.io/managed-by: ai-solutions
+    app.kubernetes.io/part-of: confidential-containers
+spec:
+  validationActions: [Deny]
+  failurePolicy: Fail
+  evaluation:
+    background:
+      enabled: false
+  autogen:
+    podControllers:
+      controllers: []
+    # Native Kubernetes ValidatingAdmissionPolicy too, so the rule holds while Kyverno is down
+    validatingAdmissionPolicy:
+      enabled: true
+  # Only call Kyverno when something this policy cares about changes. Kubernetes evaluates
+  # matchConditions itself, so ordinary pod updates (labels, finalizer removal on delete) in
+  # opted-in namespaces don't depend on Kyverno being up.
+  matchConditions:
+    - name: kata-annotations-changed-or-debug
+      expression: >-
+        request.?subResource.orValue('') == 'ephemeralcontainers' ||
+        !(size(object.metadata.?annotations.orValue({}).filter(k, k.startsWith('io.katacontainers.')))
+            == size(oldObject.metadata.?annotations.orValue({}).filter(k, k.startsWith('io.katacontainers.')))
+          && object.metadata.?annotations.orValue({}).filter(k, k.startsWith('io.katacontainers.')).all(k,
+            k in oldObject.metadata.?annotations.orValue({})
+            && oldObject.metadata.annotations[k] == object.metadata.annotations[k]))
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        {{ cc_namespace_label_key }}: "true"
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  variables:
+    - name: annotations
+      expression: "object.metadata.?annotations.orValue({})"
+    - name: oldAnnotations
+      expression: "oldObject.metadata.?annotations.orValue({})"
+    - name: kataKeys
+      expression: "variables.annotations.filter(k, k.startsWith('io.katacontainers.'))"
+    - name: oldKataKeys
+      expression: "variables.oldAnnotations.filter(k, k.startsWith('io.katacontainers.'))"
+  validations:
+    - expression: "request.?subResource.orValue('') != 'ephemeralcontainers'"
+      message: "ephemeral (kubectl debug) containers are not allowed in confidential pods"
+    - expression: "size(variables.kataKeys) == size(variables.oldKataKeys) && variables.kataKeys.all(k, k in variables.oldAnnotations && variables.oldAnnotations[k] == variables.annotations[k])"
+      message: "io.katacontainers.* annotations of a confidential pod cannot be changed after it is created"

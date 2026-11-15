@@ -1,0 +1,155 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Confidential Containers — Validate
+# =============================================================================
+
+- name: "confidential_containers | validate | Get ConfigMap {{ cc_configmap_namespace }}/{{ cc_configmap_name }}"
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    name: "{{ cc_configmap_name }}"
+    namespace: "{{ cc_configmap_namespace }}"
+  register: _cc_cm
+
+- name: "confidential_containers | validate | Assert the ConfigMap carries the contract"
+  vars:
+    _data: "{{ (_cc_cm.resources | first | default({})).data | default({}) }}"
+  ansible.builtin.assert:
+    that:
+      - _cc_cm.resources | length == 1
+      - _data.runtimeClass | default('') == kata_confidential_runtime
+      - _data.initdata | default('') | length > 0
+      - (_data.initdataDigest | default('')).startswith('sha384:')
+    fail_msg: "ConfigMap {{ cc_configmap_namespace }}/{{ cc_configmap_name }} is missing or incomplete. Run: es_auto_installer.sh install confidential_containers"
+    success_msg: "ConfigMap present (runtimeClass {{ _data.runtimeClass | default('') }}, initdata {{ _data.initdataDigest | default('') }})"
+
+- name: "confidential_containers | validate | Get the ValidatingPolicies"
+  kubernetes.core.k8s_info:
+    api_version: policies.kyverno.io/v1
+    kind: ValidatingPolicy
+    name: "{{ item }}"
+  loop: "{{ _cc_policy_names }}"
+  register: _cc_policy
+
+- name: "confidential_containers | validate | Get the native ValidatingAdmissionPolicies"
+  kubernetes.core.k8s_info:
+    api_version: admissionregistration.k8s.io/v1
+    kind: "{{ item.0 }}"
+    name: "vpol-{{ item.1 }}{{ item.2 }}"
+  loop: >-
+    {{ [['ValidatingAdmissionPolicy', _cc_policy_names[0], ''], ['ValidatingAdmissionPolicy', _cc_policy_names[1], ''],
+        ['ValidatingAdmissionPolicyBinding', _cc_policy_names[0], '-binding'],
+        ['ValidatingAdmissionPolicyBinding', _cc_policy_names[1], '-binding']] }}
+  loop_control:
+    label: "{{ item.0 }} vpol-{{ item.1 }}{{ item.2 }}"
+  register: _cc_vap
+
+- name: "confidential_containers | validate | Assert the native policies exist and deny"
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - item.item.0 != 'ValidatingAdmissionPolicyBinding' or 'Deny' in (item.resources[0].spec.validationActions | default([]))
+    fail_msg: >-
+      {{ item.item.0 }} vpol-{{ item.item.1 }}{{ item.item.2 }} is missing (or doesn't deny). Without it the rules are
+      not enforced while Kyverno is down. Check that Kyverno runs with generateValidatingAdmissionPolicy enabled and
+      that the API server serves admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (Kubernetes >= 1.30).
+    success_msg: "{{ item.item.0 }} vpol-{{ item.item.1 }}{{ item.item.2 }} present"
+  loop: "{{ _cc_vap.results }}"
+  loop_control:
+    label: "{{ item.item.0 }} vpol-{{ item.item.1 }}{{ item.item.2 }}"
+
+- name: "confidential_containers | validate | Assert the policies are ready"
+  ansible.builtin.assert:
+    that:
+      - item.resources | length == 1
+      - (item.resources[0].status.conditionStatus.ready | default(false)) | bool
+    fail_msg: "ValidatingPolicy {{ item.item }} is missing or not ready (is Kyverno running?)"
+    success_msg: "ValidatingPolicy {{ item.item }} ready"
+  loop: "{{ _cc_policy.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# Dry-run pods (checked by admission, never created) in a throw-away opted-in namespace
+- name: "confidential_containers | validate | Policy smoke test"
+  when: cc_validate_smoke_test | bool
+  vars:
+    _initdata: "{{ (_cc_cm.resources | first).data.initdata }}"
+    _good:
+      apiVersion: v1
+      kind: Pod
+      metadata:
+        name: cc-smoke
+        namespace: "{{ cc_smoke_namespace }}"
+        annotations:
+          io.katacontainers.config.hypervisor.cc_init_data: "{{ _initdata }}"
+      spec:
+        runtimeClassName: "{{ kata_confidential_runtime }}"
+        securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+        volumes:
+          - name: scratch
+            emptyDir: {}
+        containers:
+          - name: c
+            image: registry.k8s.io/pause:3.10
+            imagePullPolicy: Always
+            securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: ["ALL"]}}
+            volumeMounts: [{name: scratch, mountPath: /scratch}]
+    _cases:
+      - name: approved confidential pod
+        pod: "{{ _good }}"
+        allowed: true
+      - name: no runtimeClassName (runc)
+        pod: "{{ _good | combine({'spec': {'runtimeClassName': none}}, recursive=True) }}"
+        allowed: false
+      - name: wrong initdata
+        pod: "{{ _good | combine({'metadata': {'annotations': {'io.katacontainers.config.hypervisor.cc_init_data': 'H4sIAAAAAAAAA0tMBQAAAP//'}}}, recursive=True) }}"
+        allowed: false
+      - name: extra Kata annotation (default_memory)
+        pod: "{{ _good | combine({'metadata': {'annotations': {'io.katacontainers.config.hypervisor.default_memory': '8192'}}}, recursive=True) }}"
+        allowed: false
+      - name: hostPath volume
+        pod: "{{ _good | combine({'spec': {'volumes': [{'name': 'scratch', 'hostPath': {'path': '/tmp'}}]}}, recursive=True) }}"
+        allowed: false
+      - name: imagePullPolicy IfNotPresent
+        pod: "{{ _good | combine({'spec': {'containers': [_good.spec.containers[0] | combine({'imagePullPolicy': 'IfNotPresent'})]}}, recursive=True) }}"
+        allowed: false
+  block:
+    # Pod Security "privileged" here so that only the confidential-runtime policy decides
+    # (baseline would reject the hostPath case first). Dry-run pods are never created.
+    - name: "confidential_containers | validate | Create smoke-test namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ cc_smoke_namespace }}"
+            labels: "{{ {cc_namespace_label_key: 'true', 'pod-security.kubernetes.io/enforce': 'privileged'} }}"
+
+    - name: "confidential_containers | validate | Dry-run pods against the policy"
+      ansible.builtin.command:
+        cmd: kubectl create --dry-run=server -f -
+        stdin: "{{ item.pod | to_json }}"
+      loop: "{{ _cases }}"
+      loop_control:
+        label: "{{ item.name }} → {{ 'allowed' if item.allowed else 'rejected' }}"
+      register: _cc_smoke
+      changed_when: false
+      failed_when: >-
+        (item.allowed and _cc_smoke.rc != 0) or
+        (not item.allowed and (_cc_smoke.rc == 0
+         or ("ValidatingAdmissionPolicy 'vpol-" ~ cc_policy_name ~ "'") not in _cc_smoke.stderr))
+
+  always:
+    - name: "confidential_containers | validate | Remove smoke-test namespace"
+      kubernetes.core.k8s:
+        state: absent
+        kind: Namespace
+        name: "{{ cc_smoke_namespace }}"
+        wait: true
+      failed_when: false
+
+- name: "confidential_containers | validate | Validation passed"
+  ansible.builtin.debug:
+    msg: "confidential-runtime contract validated."
