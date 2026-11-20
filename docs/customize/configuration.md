@@ -477,6 +477,19 @@ Example: `config.erag.yaml` sets RAG pipeline parameters like `ui_enabled`, `edp
 
 ---
 
+## Kyverno
+
+Opt-in policy engine (the `kyverno` platform component). Components that ship admission policies, such as
+`confidential_containers`, need it. See [Kyverno Policy Engine](kyverno.md).
+
+| Setting | Default | Description |
+|---|---|---|
+| `kyverno_enabled` | `false` | Install Kyverno (chart 3.9.2, Kyverno 1.19.2) in namespace `kyverno` |
+| `kyverno_admission_replicas` | `1` | Admission controller replicas; use `3` in production |
+| `kyverno_teardown_force` | `false` | Tear Kyverno down even while platform policies exist |
+
+---
+
 ## Related Docs
 
 | If you want to… | Go to |
@@ -486,3 +499,4 @@ Example: `config.erag.yaml` sets RAG pipeline parameters like `ui_enabled`, `edp
 | Run pods in Kata VMs or Intel® TDX Trust Domains (`kata_containers_enabled`, `kata_confidential_runtime`) | [Kata & Confidential Runtime](kata_confidential_containers.md) |
 | Set up soft affinity for platform vs. inference workloads (`node_topology_enabled`) | [Node Topology & Workload Placement](node_topology.md) |
 | Go from a fresh clone to a running cluster using these settings | [Deployment Guide](../deploy/install_platform.md) |
+| Add admission policies with Kyverno (`kyverno_enabled`) | [Kyverno Policy Engine](kyverno.md) |

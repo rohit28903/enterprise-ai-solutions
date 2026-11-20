@@ -1,0 +1,103 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Kyverno — Install via Helm
+# =============================================================================
+
+- name: "kyverno | Add Kyverno Helm repo"
+  kubernetes.core.helm_repository:
+    name: kyverno
+    repo_url: "{{ kyverno_helm_repo }}"
+  register: _kyverno_repo
+  until: _kyverno_repo is succeeded
+  retries: "{{ helm_retries }}"
+  delay: 15
+
+- name: "kyverno | Update Helm repo"
+  ansible.builtin.command: helm repo update kyverno
+  changed_when: false
+
+# Kyverno's pods meet the restricted Pod Security Standard
+- name: "kyverno | Create namespace"
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ kyverno_namespace }}"
+        labels: "{{ _pss_labels if (enforce_pss | default(false) | bool) else {} }}"
+  vars:
+    _pss_labels:
+      pod-security.kubernetes.io/enforce: "restricted"
+      pod-security.kubernetes.io/audit: "restricted"
+      pod-security.kubernetes.io/warn: "restricted"
+
+- name: "kyverno | Install Kyverno {{ kyverno_version }}"
+  vars:
+    _node_affinity: "{{ (_platform_affinity | default({})).nodeAffinity | default({}) }}"
+  kubernetes.core.helm:
+    name: "{{ kyverno_release_name }}"
+    chart_ref: kyverno/kyverno
+    chart_version: "{{ kyverno_version }}"
+    release_namespace: "{{ kyverno_namespace }}"
+    # One values dict, so an unchanged release is not upgraded on every run
+    values:
+      admissionController:
+        replicas: "{{ kyverno_admission_replicas | int }}"
+        nodeAffinity: "{{ _node_affinity }}"
+      backgroundController:
+        nodeAffinity: "{{ _node_affinity }}"
+      cleanupController:
+        nodeAffinity: "{{ _node_affinity }}"
+      reportsController:
+        nodeAffinity: "{{ _node_affinity }}"
+      # Generate native Kubernetes ValidatingAdmissionPolicies from ValidatingPolicies that ask for it
+      # (autogen.validatingAdmissionPolicy): they keep working while Kyverno is down. Chart default today,
+      # pinned so a chart change can't switch it off silently.
+      features:
+        generateValidatingAdmissionPolicy:
+          enabled: true
+      config:
+        webhooks:
+          namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: NotIn
+                values: "{{ kyverno_webhook_excluded_namespaces }}"
+    wait: "{{ helm_wait }}"
+    timeout: "{{ helm_timeout }}"
+  register: _kyverno_helm
+  until: _kyverno_helm is succeeded
+  retries: "{{ helm_retries }}"
+  delay: 15
+
+- name: "kyverno | Wait for the Kyverno controllers"
+  ansible.builtin.command: >-
+    kubectl -n {{ kyverno_namespace }} rollout status deployment
+    -l app.kubernetes.io/part-of={{ kyverno_release_name }} --timeout={{ kyverno_wait_timeout }}
+  changed_when: false
+
+- name: "kyverno | Wait for the ValidatingPolicy CRD"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: validatingpolicies.policies.kyverno.io
+    wait: true
+    wait_condition:
+      type: Established
+      status: "True"
+    wait_timeout: 120
+
+- name: "kyverno | Deployment summary"
+  ansible.builtin.debug:
+    msg:
+      - "============================================================"
+      - "  Kyverno deployed"
+      - "  Chart / app   : {{ kyverno_version }}"
+      - "  Namespace     : {{ kyverno_namespace }}"
+      - "  Webhooks skip : {{ (kyverno_webhook_excluded_namespaces + [kyverno_namespace]) | join(', ') }}"
+      - "  Policy types  : policies.kyverno.io/v1 ValidatingPolicy, MutatingPolicy"
+      - "  Verify        : kubectl -n {{ kyverno_namespace }} get pods; kubectl get validatingpolicies"
+      - "============================================================"

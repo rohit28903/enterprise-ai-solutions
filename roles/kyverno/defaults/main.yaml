@@ -1,0 +1,36 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Kyverno Role Defaults
+# =============================================================================
+# Kyverno is the cluster's policy engine: it checks (and can change) objects
+# before the API server accepts them. Off by default (kyverno_enabled).
+# Components ship their rules as CEL policies in the policies.kyverno.io group
+# (ValidatingPolicy / MutatingPolicy); the legacy ClusterPolicy type is deprecated.
+
+kyverno_version: "3.9.2"            # Helm chart version (Kyverno v1.19.2)
+kyverno_namespace: "kyverno"
+kyverno_release_name: "kyverno"
+kyverno_helm_repo: "https://kyverno.github.io/kyverno/"
+kyverno_wait_timeout: "300s"
+
+# Admission controller replicas: 1 for a single node / PoC, 3 for HA
+kyverno_admission_replicas: 1
+
+# Namespaces Kyverno's admission webhooks never see. The Kyverno namespace is
+# always excluded by the chart (excludeKyvernoNamespace).
+kyverno_webhook_excluded_namespaces:
+  - kube-system
+
+# validate: apply a throw-away ValidatingPolicy and check that it rejects a pod
+# (server-side dry run: the pod is never created)
+kyverno_validate_smoke_test: true
+kyverno_smoke_namespace: "kyverno-smoke-test"
+
+# teardown: also delete the CRDs this release installed (deletes every Kyverno policy in the cluster)
+kyverno_teardown_delete_crds: true
+
+# teardown refuses while platform policies (label app.kubernetes.io/managed-by=ai-solutions,
+# e.g. confidential_containers) exist; true removes Kyverno anyway
+kyverno_teardown_force: false

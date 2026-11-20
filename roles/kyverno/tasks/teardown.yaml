@@ -1,0 +1,114 @@
+---
+# Copyright (C) 2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+# =============================================================================
+# Kyverno — Teardown
+# =============================================================================
+# A Kyverno webhook left behind without Kyverno running can block object
+# creation cluster-wide, so teardown ends by checking that none remain.
+
+# Deleting Kyverno's CRDs deletes every policy with them. Policies other platform
+# components rely on (e.g. confidential_containers) would vanish silently, and
+# their opted-in namespaces would accept any pod. Remove those components first.
+- name: "kyverno | teardown | Find platform policies that depend on Kyverno"
+  kubernetes.core.k8s_info:
+    api_version: "policies.kyverno.io/v1"
+    kind: "{{ item }}"
+    label_selectors:
+      - "app.kubernetes.io/managed-by=ai-solutions"
+  loop: [ValidatingPolicy, MutatingPolicy]
+  register: _kyv_dependent_policies
+  failed_when: false
+
+- name: "kyverno | teardown | Stop while platform policies still exist"
+  vars:
+    _names: >-
+      {{ _kyv_dependent_policies.results | map(attribute='resources', default=[]) | flatten
+         | map(attribute='metadata.name') | list }}
+  ansible.builtin.fail:
+    msg: >-
+      Kyverno still enforces platform policies ({{ _names | join(', ') }}). Removing Kyverno would delete
+      them and switch the protection off without notice. Tear down the components that own them first,
+      e.g.: es_auto_installer.sh teardown confidential_containers --only. Set
+      kyverno_teardown_force: true to remove Kyverno anyway.
+  when:
+    - _names | length > 0
+    - not (kyverno_teardown_force | bool)
+
+- name: "kyverno | teardown | Check if Helm release exists"
+  kubernetes.core.helm_info:
+    name: "{{ kyverno_release_name }}"
+    release_namespace: "{{ kyverno_namespace }}"
+  register: _kyv_release
+  failed_when: false
+
+# The chart's pre-delete hook removes the webhook configurations Kyverno registered
+- name: "kyverno | teardown | Uninstall Helm release"
+  kubernetes.core.helm:
+    name: "{{ kyverno_release_name }}"
+    release_namespace: "{{ kyverno_namespace }}"
+    state: absent
+    wait: "{{ helm_wait }}"
+    timeout: "{{ helm_timeout }}"
+  when: _kyv_release.status is defined
+  failed_when: false
+
+- name: "kyverno | teardown | Delete namespace"
+  kubernetes.core.k8s:
+    state: absent
+    kind: Namespace
+    name: "{{ kyverno_namespace }}"
+    wait: true
+    wait_timeout: 300
+  failed_when: false
+
+- name: "kyverno | teardown | Find Kyverno CRDs"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+  register: _kyv_crds
+  when: kyverno_teardown_delete_crds | bool
+
+# Only CRDs this Helm release installed: wgpolicyk8s.io and openreports.io are shared
+# report standards that other tools (e.g. Trivy Operator) may have installed themselves.
+- name: "kyverno | teardown | Delete the CRDs installed by this Kyverno release"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item.metadata.name }}"
+  loop: >-
+    {{ _kyv_crds.resources | default([])
+       | selectattr('metadata.name', 'match', '.*\.(kyverno\.io|wgpolicyk8s\.io|openreports\.io)$') | list }}
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  vars:
+    _ann: "{{ item.metadata.annotations | default({}) }}"
+  when:
+    - kyverno_teardown_delete_crds | bool
+    - _ann['meta.helm.sh/release-name'] | default('') == kyverno_release_name
+    - _ann['meta.helm.sh/release-namespace'] | default('') == kyverno_namespace
+  failed_when: false
+
+- name: "kyverno | teardown | Find leftover Kyverno webhook configurations"
+  kubernetes.core.k8s_info:
+    api_version: admissionregistration.k8s.io/v1
+    kind: "{{ item }}"
+    label_selectors:
+      - "webhook.kyverno.io/managed-by=kyverno"
+  loop: [ValidatingWebhookConfiguration, MutatingWebhookConfiguration]
+  register: _kyv_webhooks
+
+- name: "kyverno | teardown | Delete leftover Kyverno webhook configurations"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: admissionregistration.k8s.io/v1
+    kind: "{{ item.0.item }}"
+    name: "{{ item.1.metadata.name }}"
+  loop: "{{ _kyv_webhooks.results | subelements('resources') }}"
+  loop_control:
+    label: "{{ item.0.item }}/{{ item.1.metadata.name }}"
+
+- name: "kyverno | teardown | Complete"
+  ansible.builtin.debug:
+    msg: "Kyverno removed from namespace '{{ kyverno_namespace }}'; no Kyverno webhooks remain."
